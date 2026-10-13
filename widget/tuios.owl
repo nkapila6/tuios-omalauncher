@@ -1,0 +1,243 @@
+widget "tuios" {
+  page: 2
+  size: 6x12
+  minSize: 6x8
+  padding: 0
+
+  meta { owl: 7; description: "An agent multiplexer on tuios: Claude Code, Oh My Pi or any agent in tabs that keep running, an inbox of every agent, notifications and touch scrolling"; version: "1.0"; license: "MIT"; category: "dev" }
+  requires { pacman: ["jq", "micro", "procps-ng"] }
+
+  // The Linux side is tuios-omalauncher (github.com/nkapila6/tuios-omalauncher), which drives a tuios
+  // session: each tab is a tuios window on its own workspace, so tabs keep running while another is
+  // shown, and the session outlives the tile because the widget starts the daemon itself.
+  // Agents come from ~/.config/omalauncher/agents.conf ("name = command" lines). Tap the terminal to
+  // type; drag up or down (or ▲ ▼) to scroll it; ☰ read swaps in a native, swipeable copy.
+  source conf = file("~/.config/omalauncher/agents.conf") optional
+  let parsed = lines(conf ?? "").map(l => trim(l))
+    .filter(l => l != "" && !startsWith(l, "#") && contains(l, "="))
+    .map(l => { name: trim(split(l, "=")[0]), cmd: trim(join(split(l, "=").drop(1), "=")) })
+  let agents = len(parsed) > 0 ? parsed : [
+    { name: "claude", cmd: "claude --settings '{\"tui\":\"default\"}'" },
+    { name: "terminal", cmd: "bash" }
+  ]
+
+  // Tabs: one per agent to start with; + opens more. -1 is the agents.conf editor, -2 the inbox.
+  state tabs = [] persist
+  state nid = 100 persist
+  state tab = 0 persist
+  state picking = false
+  state reading = false
+  state confirmExit = false
+  state closing = 0
+  state notifyOn = true persist
+  // Set by tuios's after-agent-state hook through owl-send (tuios-omalauncher notify-hook).
+  state alert = ""
+  // Drag distance not yet scrolled: lines of about 16 dp, vertical drags only.
+  state dragY = 0
+  state dragX = 0
+  state portCmd = ""
+  state updateMsg = ""
+  on portCmd { terminal(value, cur == null ? "terminal" : cur.agent) }
+
+  let open = len(tabs) > 0 ? tabs : range(len(agents)).map(i => { id: i, agent: agents[i].name })
+  let cur = open.find(t => t.id == tab)
+  let curCmd = cur == null ? "bash" : (agents.find(a => a.name == cur.agent)).cmd ?? "bash"
+  let editCmd = "micro ~/.config/omalauncher/agents.conf; clear; echo 'Saved. Pick a tab above.'"
+  let inTerminal = tab != -2
+
+  // The daemon is started from here, in the launcher's long-lived sandbox, so the session outlives the
+  // tile's terminal (which only attaches). Then the shown tab's window is opened or focused.
+  when conf != null { run("tuios-omalauncher start && tuios-omalauncher setup") }
+  let showTab = "tuios-omalauncher tab ${int(tab)} ${sh(tab == -1 ? editCmd : curCmd)}"
+  on tab { run(inTerminal ? showTab : "true") }
+  when conf != null { run(inTerminal ? showTab : "true") }
+
+  // Each tab's agent state and what its shell runs; a busy tab asks before it's closed.
+  source st = cmd("tuios-omalauncher status") every 3s json optional
+  source inbox = cmd("tuios-omalauncher inbox") every 5s json optional
+  source hist = cmd(reading ? "tuios-omalauncher read" : "true") every 2s optional
+  let me = (st ?? []).find(s => s.id == tab)
+  let running = me == null ? "" : me.running
+  let busy = running != ""
+  let waiting = (inbox ?? []).count(a => a.needs_you || a.state == "needs_input")
+
+  // Android notifications for agents that need you, error or finish (tuios decides which and when).
+  let al = parseJson(alert)
+  let alertTab = al == null ? null : open.find(t => "t${t.id}" == al.win)
+  when al != null && notifyOn {
+    notify("${alertTab == null ? (al.harness == "" ? "agent" : al.harness) : alertTab.agent}: ${al.state == "needs_input" ? "needs you" : al.state}", al.text == "" ? "in ${al.win}" : al.text)
+    alert = ""
+  }
+  when al != null && !notifyOn { alert = "" }
+
+  Column {
+    gap: 0
+    Row {
+      gap: 4
+      align: center
+      padding: [10, 6]
+      Flow {
+        gap: 4
+        weight: 1
+        Text { text: waiting > 0 ? "inbox ${waiting}" : "inbox"; width: waiting > 0 ? 64 : 48; style: label; bold: tab == -2; color: tab == -2 ? accent : waiting > 0 ? yellow : muted; onTap: { tab = -2; picking = false; reading = false; confirmExit = false } }
+        for t, i in open key t.id {
+          let n = open.take(i + 1).count(x => x.agent == t.agent)
+          let label = n > 1 ? "${t.agent} ${n}" : t.agent
+          let s = ((st ?? []).find(x => x.id == t.id)).state ?? "none"
+          Row {
+            gap: 3
+            width: len(label) * 9 + (s == "none" ? 18 : 30)
+            align: center
+            if s != "none" {
+              Text { text: "●"; width: 10; fontSize: 9; color: (s == "working" ? green : s == "needs_input" ? yellow : s == "errored" ? red : s == "done" ? blue : muted) }
+            }
+            Text { text: label; style: label; bold: tab == t.id; color: tab == t.id ? accent : muted; onTap: { tab = t.id; picking = false; confirmExit = false } }
+          }
+          if tab == t.id && len(open) > 1 {
+            Text { text: "×"; width: 22; style: label; color: muted; onTap: {
+              confirmExit = busy; closing = tab
+              run(busy ? "true" : "tuios-omalauncher close ${int(t.id)}")
+              tab = busy ? tab : open.filter(x => x.id != closing)[0].id
+              tabs = busy ? tabs : open.filter(x => x.id != closing)
+            } }
+          }
+        }
+      }
+      Text { text: "+"; width: 26; style: label; bold: picking; color: picking ? accent : muted; align: center; onTap: picking = !picking }
+      Text { text: "⧉"; width: 26; style: label; color: muted; align: center; onTap: { reading = false; portCmd = run("tuios-omalauncher port ${int(tab)} ${sh(curCmd)}") } }
+      Text { text: "⚙"; width: 26; style: label; color: muted; align: center; onTap: { updateMsg = run("tuios-omalauncher update-check"); screen() } }
+    }
+    if picking {
+      Flow {
+        gap: 6
+        padding: [10, 0, 10, 6]
+        Text { text: "open another:"; width: 104; style: small; color: muted }
+        for a in agents key a.name {
+          Button { text: a.name; color: accent; onTap: { tabs = [open, [{ id: nid, agent: a.name }]].flatten(); tab = nid; nid = nid + 1; picking = false } }
+        }
+      }
+    }
+    if tab >= 0 {
+      // ▲ ▼ ⤓ scroll the tab (tuios's shift+up/down, which never reach the program as text), ☰ shows
+      // a swipeable copy, ✕ closes the tab (asking first when it runs something).
+      Flow {
+        gap: 6
+        padding: [10, 0, 10, 6]
+        Text { text: "▲"; width: 26; style: label; color: accent; align: center; onTap: run("tuios-omalauncher scroll 10") }
+        Text { text: "▼"; width: 26; style: label; color: accent; align: center; onTap: run("tuios-omalauncher scroll -10") }
+        Text { text: "⤓"; width: 26; style: label; color: muted; align: center; onTap: run("tuios-omalauncher bottom") }
+        Text { text: reading ? "⌨ live" : "☰ read"; width: 62; style: label; bold: true; color: reading ? accent : muted; onTap: reading = !reading }
+        if confirmExit {
+          Text { text: "end ${running}?"; width: len(running) * 9 + 46; style: label; color: red; bold: true; onTap: {
+            confirmExit = false; reading = false; closing = tab
+            run(len(open) > 1 ? "tuios-omalauncher close ${int(tab)}" : "tuios-omalauncher close ${int(tab)}; tuios-omalauncher tab ${int(tab)} ${sh(curCmd)}")
+            // tab moves first, while open still has the closing tab, so both lines see the same list.
+            tab = len(open) > 1 ? open.filter(x => x.id != closing)[0].id : tab
+            tabs = len(open) > 1 ? open.filter(x => x.id != closing) : tabs
+          } }
+          Text { text: "no"; width: 26; style: label; color: muted; onTap: confirmExit = false }
+        } else {
+          Text { text: "✕ exit"; width: 52; style: label; color: red; onTap: {
+            confirmExit = busy; closing = tab
+            run(busy ? "true" : len(open) > 1 ? "tuios-omalauncher close ${int(tab)}" : "tuios-omalauncher close ${int(tab)}; tuios-omalauncher tab ${int(tab)} ${sh(curCmd)}")
+            tab = !busy && len(open) > 1 ? open.filter(x => x.id != closing)[0].id : tab
+            tabs = !busy && len(open) > 1 ? open.filter(x => x.id != closing) : tabs
+          } }
+        }
+      }
+    }
+    Box {
+      weight: 1
+      // The tile's one terminal, attached to the session. Hiding it would stop it, so the inbox and the
+      // read view cover it instead.
+      Row {
+        gap: 0
+        fill: true
+        // Up and down only: a drag that goes more sideways than up or down scrolls nothing.
+        onDrag: {
+          dragX = dragX + dx
+          run(!reading && abs(dragY + dy) >= 16 && abs(dragY + dy) > abs(dragX) ? "tuios-omalauncher scroll ${int((dragY + dy) / 16)}" : "true")
+          dragX = abs(dragY + dy) >= 16 ? 0 : dragX
+          dragY = abs(dragY + dy) >= 16 ? (dragY + dy) % 16 : dragY + dy
+        }
+        Box {
+          weight: 1
+          Terminal { command: "tuios-omalauncher attach" }
+        }
+        Column {
+          width: 22
+          fill: height
+          justify: center
+          background: alpha(muted, 0.12)
+          Text { text: "⋮"; style: label; color: muted; align: center }
+        }
+      }
+      if reading && tab >= 0 {
+        Column {
+          scroll: true
+          fill: true
+          padding: [10, 4]
+          background: background
+          Text { text: hist == null || hist == "" ? "Nothing to show yet." : hist; font: mono; style: small }
+        }
+      }
+      if tab == -2 {
+        Column {
+          scroll: true
+          fill: true
+          gap: 8
+          padding: [10, 6]
+          background: background
+          if len(inbox ?? []) == 0 {
+            Text { text: inbox == null ? "…" : "No agents running."; style: small; color: muted }
+          }
+          for a in inbox ?? [] key "${a.session}/${a.name}" {
+            let mine = a.session == "omalauncher" && startsWith(a.name, "t")
+            let t = mine ? open.find(x => "t${x.id}" == a.name) : null
+            Column {
+              gap: 2
+              padding: [10, 8]
+              border: 1
+              borderColor: alpha((a.state == "working" ? green : a.state == "needs_input" ? yellow : a.state == "errored" ? red : a.state == "done" ? blue : muted), 0.5)
+              onTap: { tab = t == null ? tab : t.id }
+              Row {
+                gap: 6
+                align: center
+                Text { text: "●"; width: 12; fontSize: 10; color: (a.state == "working" ? green : a.state == "needs_input" ? yellow : a.state == "errored" ? red : a.state == "done" ? blue : muted) }
+                Text { text: t == null ? "${a.session} · ${a.name}" : t.agent; style: body; maxLines: 1; weight: 1 }
+                Text { text: a.needs_you ? "needs you" : a.state; style: small; color: (a.state == "working" ? green : a.state == "needs_input" ? yellow : a.state == "errored" ? red : a.state == "done" ? blue : muted); width: 84; align: end; maxLines: 1 }
+              }
+              Text { text: "${a.app} · ${a.cwd}"; style: small; color: muted; maxLines: 1 }
+              if a.message != "" {
+                Text { text: a.message; style: small; italic: true; maxLines: 3 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  screen {
+    title: "tuios settings"
+    Column {
+      scroll: true
+      gap: 14
+      padding: 4
+      Text { text: "tuios"; style: label; color: accent }
+      Text { text: updateMsg == "" ? "…" : updateMsg; style: body }
+      Row {
+        gap: 8
+        Button { text: "check again"; color: muted; onTap: updateMsg = run("tuios-omalauncher update-check") }
+        Button { text: "update tuios"; color: accent; onTap: updateMsg = run("tuios-omalauncher update") }
+      }
+      Text { text: "notifications"; style: label; color: accent }
+      Text { text: "An Android notification when an agent needs you, errors or finishes."; style: small; color: muted }
+      Button { text: notifyOn ? "on" : "off"; color: notifyOn ? green : muted; onTap: notifyOn = !notifyOn }
+      Text { text: "agents"; style: label; color: accent }
+      Text { text: "The tabs + can open: one \"name = command\" per line."; style: small; color: muted }
+      Button { text: "edit agents.conf"; color: muted; onTap: { tab = -1; close() } }
+      Button { text: "close"; onTap: close() }
+    }
+  }
+}

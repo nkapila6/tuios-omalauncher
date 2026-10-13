@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# tuios-omalauncher: the Linux side of the tuios agent multiplexer widget for omalauncher.
+#
+# The widget's tile runs one terminal attached to a tuios session; each tab is a tuios window on its
+# own workspace, so it fills the tile. The widget's buttons call this script, which talks to the tuios
+# daemon directly (its socket is guarded by file permissions, which every launcher sandbox passes).
+#
+#   start                 start the daemon and the session, with a compact look for a phone tile
+#   attach                the tile's terminal: attach to the session (starting it if needed)
+#   tab <id> <command>    show tab <id>, starting <command> in it the first time
+#   close <id>            close tab <id>
+#   scroll <n>            scroll the shown tab n lines up (n > 0) or down (n < 0)
+#   bottom                scroll the shown tab back to its newest line
+#   read                  print the shown tab's last 200 lines
+#   status                JSON: each tab's id, program and agent state
+#   inbox                 JSON: every agent in every session, newest first
+#   port <id> <command>   stop a Claude session running in tab <id> and print a command that resumes it
+#                         elsewhere; for anything else, print <command>
+#   version | update-check | update
+#   setup                 register notify-hook in tuios's config.toml (once; keeps everything else)
+#   notify-hook           run by tuios on agent state changes: passes them to the widget
+set -u
+S=${TUIOS_OMALAUNCHER_SESSION:-omalauncher}
+WIDGET=${TUIOS_OMALAUNCHER_WIDGET:-$HOME/.config/omalauncher/widgets/36-tuios.owl}
+# Claude Code's fullscreen renderer takes the mouse and its own scrolling; the default one leaves the
+# history to tuios, which the tile can scroll.
+CLAUDE_FLAGS=(--settings '{"tui":"default"}')
+
+have_session() { tuios list-sessions --json 2>/dev/null | jq -e --arg s "$S" '[.. | objects | select(.name? == $s)] | length > 0' >/dev/null; }
+windows() { tuios list-windows -s "$S" --json 2>/dev/null; }
+# Window id of tab <id>, by its name t<id>.
+# Tab windows are named t<id> (tuios reports the name as display_name).
+window_of() { windows | jq -r --arg n "t$1" '.windows[]? | select(.display_name == $n) | .window_id' | head -1; }
+press() { tuios run-command -s "$S" Press "$1" >/dev/null 2>&1; }
+# What a tab's shell is busy with: the first program under it that isn't a shell (or the session
+# picker), looking through nested shells. Empty when it's just sitting at a prompt.
+busy_in() {
+  local p=$1 c n
+  for _ in 1 2 3 4 5; do
+    c=$(ps -o pid=,comm= --ppid "$p" 2>/dev/null | grep -v -E ' (ps|sleep)$' | head -1) || return
+    [ -n "$c" ] || return
+    p=$(echo "$c" | awk '{print $1}'); n=$(echo "$c" | awk '{print $2}')
+    case $n in bash|sh|zsh|fish|dash|fzf|claude-sessions) continue ;; esac
+    echo "$n"; return
+  done
+}
+# The tile is small and the widget draws its own tabs, so everything but the pane goes. tuios applies
+# (and saves to its config.toml) only with a client attached, so this runs on the first tab switch.
+compact() {
+  local mark=$HOME/.cache/tuios-omalauncher/compact
+  [ -f "$mark" ] && return
+  for kv in dockbar_position=hidden appearance.sidebar.enabled=false window_title_position=hidden \
+            hide_window_buttons=true gap=0 border_style=hidden motion=none; do
+    tuios set-config -s "$S" "${kv%%=*}" "${kv#*=}" --json 2>/dev/null | jq -e '.applied' >/dev/null || return
+  done
+  mkdir -p "${mark%/*}" && touch "$mark"
+}
+
+case ${1:-} in
+  start)
+    have_session && exit 0
+    tuios new "$S" -d >/dev/null 2>&1 || exit 1 ;;
+
+  attach)
+    for _ in $(seq 50); do have_session && break; sleep 0.2; done
+    have_session || "$0" start
+    exec tuios attach "$S" ;;
+
+  tab)
+    id=$2 cmd=$3
+    compact
+    w=$(window_of "$id")
+    if [ -n "$w" ]; then
+      tuios focus-window -s "$S" "$w" >/dev/null 2>&1
+    else
+      # The lowest workspace with no window, so each tab fills the tile on its own.
+      ws=$(tuios list-workspaces -s "$S" --json 2>/dev/null | jq -r '[.workspaces[]? | select(.window_count == 0) | .workspace] | min // empty')
+      [ -n "$ws" ] || { echo "no free workspace: tuios has 9" >&2; exit 1; }
+      tuios new-window "t$id" -s "$S" --workspace "$ws" -- env AGENT_TAB="$id" PATH="$PATH" bash -c "$cmd; exec bash" >/dev/null 2>&1
+      tuios select-workspace -s "$S" "$ws" >/dev/null 2>&1
+      # The window a new session opens with is only a placeholder until the first tab exists.
+      windows | jq -r '.windows[]? | select(.display_name | test("^t-?[0-9]+$") | not) | .window_id' |
+        while read -r p; do tuios close-window -s "$S" "$p" >/dev/null 2>&1; done
+    fi ;;
+
+  close)
+    w=$(window_of "$2"); [ -n "$w" ] && tuios close-window -s "$S" "$w" >/dev/null 2>&1 ;;
+
+  scroll)
+    n=$2; k=shift+up; [ "$n" -lt 0 ] && { n=$(( -n )); k=shift+down; }
+    [ "$n" -gt 60 ] && n=60
+    keys=$(printf "$k %.0s" $(seq "$n")); press "${keys% }" ;;
+
+  bottom)
+    press "$(printf 'shift+down %.0s' $(seq 200) | sed 's/ $//')" ;;
+
+  read)
+    tuios capture-pane -s "$S" --scrollback --lines 200 2>/dev/null ;;
+
+  status)
+    # running: what the tab's shell is running right now (empty when it sits at a prompt), so the
+    # widget asks before closing a tab that's busy, agent or not.
+    windows | jq -r '.windows[]? | select(.display_name | test("^t-?[0-9]+$")) |
+        [(.display_name | ltrimstr("t")), (.agent_state // "none"), (.focused // false), (.pid // 0)] | @tsv' |
+      while IFS=$'\t' read -r id state focused pid; do
+        run=$(busy_in "$pid")
+        jq -cn --argjson id "$id" --arg state "$state" --argjson focused "$focused" --arg running "$run" \
+          '{id: $id, state: $state, focused: $focused, running: $running}'
+      done | jq -sc . ;;
+
+  inbox)
+    tuios list-agents --all-sessions --json 2>/dev/null | jq -c '[(.agents // [])[] | {session, name,
+      app: ((.program_status[0].app // .harness_id // "") | if . == "" then "agent" else . end),
+      state, needs_you, message, unread, cwd, at: ((.agent_state_at // 0) / 1e9 | floor)}] | sort_by(-.at)' ;;
+
+  port)
+    id=$2 fallback=$3 pid=
+    for p in $(pgrep -x claude); do grep -qaz -x "AGENT_TAB=$id" /proc/"$p"/environ 2>/dev/null && pid=$p; done
+    f=$HOME/.claude/sessions/$pid.json
+    if [ -n "$pid" ] && [ -f "$f" ]; then
+      sid=$(jq -r '.sessionId // empty' "$f"); cwd=$(jq -r '.cwd // empty' "$f")
+      if [ -n "$sid" ]; then
+        kill -TERM "$pid"
+        for _ in $(seq 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+        # The trailing comment makes each answer unique, so the widget opens a window every time.
+        printf 'cd %q && claude %q %q --resume %q # %s\n' "$cwd" "${CLAUDE_FLAGS[@]}" "$sid" "$(date +%s%N)"
+        exit 0
+      fi
+    fi
+    printf '%s # %s\n' "$fallback" "$(date +%s%N)" ;;
+
+  version) tuios --version 2>/dev/null | head -1 ;;
+  update-check) tuios update --check 2>&1 | tail -1 ;;
+  update) tuios update 2>&1 | tail -2 ;;
+
+  setup)
+    cfg=${XDG_CONFIG_HOME:-$HOME/.config}/tuios/config.toml
+    mkdir -p "${cfg%/*}"; touch "$cfg"
+    grep -q 'tuios-omalauncher notify-hook' "$cfg" && exit 0
+    if grep -q '^after-agent-state' "$cfg"; then
+      echo "config.toml already has an after-agent-state hook; add \"tuios-omalauncher notify-hook\" to it" >&2; exit 1
+    elif grep -q '^\[hooks\]' "$cfg"; then
+      sed -i '/^\[hooks\]/a after-agent-state = "tuios-omalauncher notify-hook"' "$cfg"
+    else
+      printf '\n[hooks]\nafter-agent-state = "tuios-omalauncher notify-hook"\n' >>"$cfg"
+    fi ;;
+
+  notify-hook)
+    # tuios runs this on after-agent-state; the widget turns it into an Android notification.
+    msg=$(jq -cn --arg win "${TUIOS_WINDOW_NAME:-}" --arg state "${TUIOS_AGENT_STATE:-}" \
+      --arg harness "${TUIOS_AGENT_HARNESS:-}" --arg text "${TUIOS_AGENT_MESSAGE:-}" \
+      '{win: $win, state: $state, harness: $harness, text: ($text | .[0:160]), at: now}')
+    owl-send "$WIDGET" set alert "$msg" >/dev/null 2>&1 ;;
+
+  *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
