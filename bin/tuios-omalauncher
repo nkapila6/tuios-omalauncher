@@ -11,6 +11,7 @@
 #   close <id>            close tab <id>
 #   scroll <n>            scroll the shown tab n lines up (n > 0) or down (n < 0)
 #   bottom                scroll the shown tab back to its newest line
+#   show tabs|sessions|rail|inbox   open tuios's own workspace or session switcher, rail or inbox
 #   read                  print the shown tab's last 200 lines
 #   status                JSON: each tab's id, program and agent state
 #   inbox                 JSON: every agent in every session, newest first
@@ -93,6 +94,11 @@ case ${1:-} in
 
   bottom)
     press "$(printf 'shift+down %.0s' $(seq 200) | sed 's/ $//')" ;;
+
+  show)
+    # tuios handles its prefix keys itself, so these never reach the program in the pane.
+    case $2 in tabs) k='ctrl+b W' ;; sessions) k='ctrl+b S' ;; rail) k='ctrl+b b' ;; inbox) k='ctrl+b i' ;; *) exit 2 ;; esac
+    press "$k" ;;
 
   read)
     tuios capture-pane -s "$S" --scrollback --lines 200 2>/dev/null ;;

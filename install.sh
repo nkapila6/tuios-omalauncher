@@ -45,7 +45,7 @@ if [ ! -f "$conf" ]; then
 # Tabs of the tuios widget, one per line: name = command
 # Claude Code's default renderer leaves scrolling to tuios, which the widget can drive.
 claude = claude --settings '{"tui":"default"}'
-terminal = bash
+term = bash
 EOF
 fi
 

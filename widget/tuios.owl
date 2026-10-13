@@ -18,7 +18,7 @@ widget "tuios" {
     .map(l => { name: trim(split(l, "=")[0]), cmd: trim(join(split(l, "=").drop(1), "=")) })
   let agents = len(parsed) > 0 ? parsed : [
     { name: "claude", cmd: "claude --settings '{\"tui\":\"default\"}'" },
-    { name: "terminal", cmd: "bash" }
+    { name: "term", cmd: "bash" }
   ]
 
   // Tabs: one per agent to start with; + opens more. -1 is the agents.conf editor, -2 the inbox.
@@ -30,6 +30,7 @@ widget "tuios" {
   state confirmExit = false
   state closing = 0
   state notifyOn = true persist
+  state railOpen = true persist
   // Set by tuios's after-agent-state hook through owl-send (tuios-omalauncher notify-hook).
   state alert = ""
   // Drag distance not yet scrolled: lines of about 16 dp, vertical drags only.
@@ -70,150 +71,165 @@ widget "tuios" {
   }
   when al != null && !notifyOn { alert = "" }
 
-  Column {
+  // Layout: the tabs down the left (they scroll when there are many), the controls and the terminal in
+  // the middle, and the scroll strip on the right. Dragging only works on the strip: a drag handler
+  // over the terminal would also take the sideways swipes that turn home pages.
+  Row {
     gap: 0
-    Row {
-      gap: 4
-      align: center
-      padding: [10, 6]
-      Flow {
-        gap: 4
+    if !railOpen {
+      // Collapsed: a dot per tab (tap to switch), « opens the rail again.
+      Column {
+        width: 24
+        fill: height
+        gap: 6
+        padding: [0, 8]
+        background: alpha(muted, 0.08)
+        Text { text: "»"; style: label; color: muted; align: center; onTap: railOpen = true }
+        Text { text: "✉"; fontSize: 11; color: tab == -2 ? accent : waiting > 0 ? yellow : muted; align: center; onTap: { tab = -2; reading = false; confirmExit = false } }
+        for t in open key t.id {
+          let s = ((st ?? []).find(x => x.id == t.id)).state ?? "none"
+          Text { text: tab == t.id ? "◉" : "●"; fontSize: 11; align: center; color: s == "working" ? green : s == "needs_input" ? yellow : s == "errored" ? red : s == "done" ? blue : tab == t.id ? accent : muted; onTap: { tab = t.id; confirmExit = false } }
+        }
+      }
+    }
+    if railOpen {
+    Column {
+      width: 76
+      fill: height
+      gap: 0
+      background: alpha(muted, 0.08)
+      Text { text: "«"; style: label; color: muted; padding: [10, 6, 10, 0]; onTap: railOpen = false }
+      Column {
+        scroll: true
         weight: 1
-        Text { text: waiting > 0 ? "inbox ${waiting}" : "inbox"; width: waiting > 0 ? 64 : 48; style: label; bold: tab == -2; color: tab == -2 ? accent : waiting > 0 ? yellow : muted; onTap: { tab = -2; picking = false; reading = false; confirmExit = false } }
+        gap: 2
+        padding: [6, 4]
+        Text { text: waiting > 0 ? "inbox ${waiting}" : "inbox"; style: label; bold: tab == -2; color: tab == -2 ? accent : waiting > 0 ? yellow : muted; padding: [0, 6]; onTap: { tab = -2; picking = false; reading = false; confirmExit = false } }
         for t, i in open key t.id {
           let n = open.take(i + 1).count(x => x.agent == t.agent)
           let label = n > 1 ? "${t.agent} ${n}" : t.agent
           let s = ((st ?? []).find(x => x.id == t.id)).state ?? "none"
           Row {
-            gap: 3
-            width: len(label) * 9 + (s == "none" ? 18 : 30)
+            gap: 4
             align: center
-            if s != "none" {
-              Text { text: "●"; width: 10; fontSize: 9; color: (s == "working" ? green : s == "needs_input" ? yellow : s == "errored" ? red : s == "done" ? blue : muted) }
-            }
-            Text { text: label; style: label; bold: tab == t.id; color: tab == t.id ? accent : muted; onTap: { tab = t.id; picking = false; confirmExit = false } }
+            padding: [0, 6]
+            onTap: { tab = t.id; picking = false; confirmExit = false }
+            Text { text: "●"; width: 9; fontSize: 9; color: s == "working" ? green : s == "needs_input" ? yellow : s == "errored" ? red : s == "done" ? blue : s == "idle" ? muted : alpha(muted, 0) }
+            Text { text: label; style: label; bold: tab == t.id; color: tab == t.id ? accent : muted; maxLines: 1 }
           }
-          if tab == t.id && len(open) > 1 {
-            Text { text: "×"; width: 22; style: label; color: muted; onTap: {
+        }
+        Text { text: picking ? "+ cancel" : "+ new"; style: label; color: picking ? accent : muted; padding: [0, 8]; onTap: picking = !picking }
+        if picking {
+          for a in agents key a.name {
+            Text { text: "  ${a.name}"; style: label; color: accent; padding: [0, 4]; onTap: { tabs = [open, [{ id: nid, agent: a.name }]].flatten(); tab = nid; nid = nid + 1; picking = false } }
+          }
+        }
+      }
+      Text { text: "⚙ settings"; style: small; color: muted; padding: [6, 10]; onTap: { updateMsg = run("tuios-omalauncher update-check"); screen() } }
+    }
+    }
+    Column {
+      weight: 1
+      fill: height
+      gap: 0
+      if tab >= 0 {
+        // ▲ ▼ ⤓ scroll (tuios's shift+up/down, which never reach the program as text), ☰ a swipeable
+        // copy, ☷ ◧ tuios's switcher and rail, ⧉ out to a window, ✕ close (asking first when busy).
+        Flow {
+          gap: 6
+          padding: [8, 6]
+          Text { text: "▲"; width: 22; style: label; color: accent; align: center; onTap: run("tuios-omalauncher scroll 10") }
+          Text { text: "▼"; width: 22; style: label; color: accent; align: center; onTap: run("tuios-omalauncher scroll -10") }
+          Text { text: "⤓"; width: 22; style: label; color: muted; align: center; onTap: run("tuios-omalauncher bottom") }
+          Text { text: reading ? "⌨ live" : "☰ read"; width: 58; style: label; bold: true; color: reading ? accent : muted; onTap: reading = !reading }
+          Text { text: "☷"; width: 22; style: label; color: muted; align: center; onTap: { reading = false; run("tuios-omalauncher show tabs") } }
+          Text { text: "◧"; width: 22; style: label; color: muted; align: center; onTap: { reading = false; run("tuios-omalauncher show rail") } }
+          Text { text: "⧉"; width: 22; style: label; color: muted; align: center; onTap: { reading = false; portCmd = run("tuios-omalauncher port ${int(tab)} ${sh(curCmd)}") } }
+          if confirmExit {
+            Text { text: "end ${running}?"; width: len(running) * 9 + 46; style: label; color: red; bold: true; onTap: {
+              confirmExit = false; reading = false; closing = tab
+              run(len(open) > 1 ? "tuios-omalauncher close ${int(tab)}" : "tuios-omalauncher close ${int(tab)}; tuios-omalauncher tab ${int(tab)} ${sh(curCmd)}")
+              // tab moves first, while open still has the closing tab, so both lines see the same list.
+              tab = len(open) > 1 ? open.filter(x => x.id != closing)[0].id : tab
+              tabs = len(open) > 1 ? open.filter(x => x.id != closing) : tabs
+            } }
+            Text { text: "no"; width: 24; style: label; color: muted; onTap: confirmExit = false }
+          } else {
+            Text { text: "✕"; width: 22; style: label; color: red; align: center; onTap: {
               confirmExit = busy; closing = tab
-              run(busy ? "true" : "tuios-omalauncher close ${int(t.id)}")
-              tab = busy ? tab : open.filter(x => x.id != closing)[0].id
-              tabs = busy ? tabs : open.filter(x => x.id != closing)
+              run(busy ? "true" : len(open) > 1 ? "tuios-omalauncher close ${int(tab)}" : "tuios-omalauncher close ${int(tab)}; tuios-omalauncher tab ${int(tab)} ${sh(curCmd)}")
+              tab = !busy && len(open) > 1 ? open.filter(x => x.id != closing)[0].id : tab
+              tabs = !busy && len(open) > 1 ? open.filter(x => x.id != closing) : tabs
             } }
           }
         }
       }
-      Text { text: "+"; width: 26; style: label; bold: picking; color: picking ? accent : muted; align: center; onTap: picking = !picking }
-      Text { text: "⧉"; width: 26; style: label; color: muted; align: center; onTap: { reading = false; portCmd = run("tuios-omalauncher port ${int(tab)} ${sh(curCmd)}") } }
-      Text { text: "⚙"; width: 26; style: label; color: muted; align: center; onTap: { updateMsg = run("tuios-omalauncher update-check"); screen() } }
-    }
-    if picking {
-      Flow {
-        gap: 6
-        padding: [10, 0, 10, 6]
-        Text { text: "open another:"; width: 104; style: small; color: muted }
-        for a in agents key a.name {
-          Button { text: a.name; color: accent; onTap: { tabs = [open, [{ id: nid, agent: a.name }]].flatten(); tab = nid; nid = nid + 1; picking = false } }
-        }
-      }
-    }
-    if tab >= 0 {
-      // ▲ ▼ ⤓ scroll the tab (tuios's shift+up/down, which never reach the program as text), ☰ shows
-      // a swipeable copy, ✕ closes the tab (asking first when it runs something).
-      Flow {
-        gap: 6
-        padding: [10, 0, 10, 6]
-        Text { text: "▲"; width: 26; style: label; color: accent; align: center; onTap: run("tuios-omalauncher scroll 10") }
-        Text { text: "▼"; width: 26; style: label; color: accent; align: center; onTap: run("tuios-omalauncher scroll -10") }
-        Text { text: "⤓"; width: 26; style: label; color: muted; align: center; onTap: run("tuios-omalauncher bottom") }
-        Text { text: reading ? "⌨ live" : "☰ read"; width: 62; style: label; bold: true; color: reading ? accent : muted; onTap: reading = !reading }
-        if confirmExit {
-          Text { text: "end ${running}?"; width: len(running) * 9 + 46; style: label; color: red; bold: true; onTap: {
-            confirmExit = false; reading = false; closing = tab
-            run(len(open) > 1 ? "tuios-omalauncher close ${int(tab)}" : "tuios-omalauncher close ${int(tab)}; tuios-omalauncher tab ${int(tab)} ${sh(curCmd)}")
-            // tab moves first, while open still has the closing tab, so both lines see the same list.
-            tab = len(open) > 1 ? open.filter(x => x.id != closing)[0].id : tab
-            tabs = len(open) > 1 ? open.filter(x => x.id != closing) : tabs
-          } }
-          Text { text: "no"; width: 26; style: label; color: muted; onTap: confirmExit = false }
-        } else {
-          Text { text: "✕ exit"; width: 52; style: label; color: red; onTap: {
-            confirmExit = busy; closing = tab
-            run(busy ? "true" : len(open) > 1 ? "tuios-omalauncher close ${int(tab)}" : "tuios-omalauncher close ${int(tab)}; tuios-omalauncher tab ${int(tab)} ${sh(curCmd)}")
-            tab = !busy && len(open) > 1 ? open.filter(x => x.id != closing)[0].id : tab
-            tabs = !busy && len(open) > 1 ? open.filter(x => x.id != closing) : tabs
-          } }
-        }
-      }
-    }
-    Box {
-      weight: 1
-      // The tile's one terminal, attached to the session. Hiding it would stop it, so the inbox and the
-      // read view cover it instead.
-      Row {
-        gap: 0
-        fill: true
-        // Up and down only: a drag that goes more sideways than up or down scrolls nothing.
-        onDrag: {
-          dragX = dragX + dx
-          run(!reading && abs(dragY + dy) >= 16 && abs(dragY + dy) > abs(dragX) ? "tuios-omalauncher scroll ${int((dragY + dy) / 16)}" : "true")
-          dragX = abs(dragY + dy) >= 16 ? 0 : dragX
-          dragY = abs(dragY + dy) >= 16 ? (dragY + dy) % 16 : dragY + dy
-        }
-        Box {
-          weight: 1
-          Terminal { command: "tuios-omalauncher attach" }
-        }
-        Column {
-          width: 22
-          fill: height
-          justify: center
-          background: alpha(muted, 0.12)
-          Text { text: "⋮"; style: label; color: muted; align: center }
-        }
-      }
-      if reading && tab >= 0 {
-        Column {
-          scroll: true
-          fill: true
-          padding: [10, 4]
-          background: background
-          Text { text: hist == null || hist == "" ? "Nothing to show yet." : hist; font: mono; style: small }
-        }
-      }
-      if tab == -2 {
-        Column {
-          scroll: true
-          fill: true
-          gap: 8
-          padding: [10, 6]
-          background: background
-          if len(inbox ?? []) == 0 {
-            Text { text: inbox == null ? "…" : "No agents running."; style: small; color: muted }
+      Box {
+        weight: 1
+        // The tile's one terminal, attached to the session. Hiding it would stop it, so the inbox and
+        // the read view cover it instead.
+        Terminal { command: "tuios-omalauncher attach" }
+        if reading && tab >= 0 {
+          Column {
+            scroll: true
+            fill: true
+            padding: [10, 4]
+            background: background
+            Text { text: hist == null || hist == "" ? "Nothing to show yet." : hist; font: mono; style: small }
           }
-          for a in inbox ?? [] key "${a.session}/${a.name}" {
-            let mine = a.session == "omalauncher" && startsWith(a.name, "t")
-            let t = mine ? open.find(x => "t${x.id}" == a.name) : null
-            Column {
-              gap: 2
-              padding: [10, 8]
-              border: 1
-              borderColor: alpha((a.state == "working" ? green : a.state == "needs_input" ? yellow : a.state == "errored" ? red : a.state == "done" ? blue : muted), 0.5)
-              onTap: { tab = t == null ? tab : t.id }
-              Row {
-                gap: 6
-                align: center
-                Text { text: "●"; width: 12; fontSize: 10; color: (a.state == "working" ? green : a.state == "needs_input" ? yellow : a.state == "errored" ? red : a.state == "done" ? blue : muted) }
-                Text { text: t == null ? "${a.session} · ${a.name}" : t.agent; style: body; maxLines: 1; weight: 1 }
-                Text { text: a.needs_you ? "needs you" : a.state; style: small; color: (a.state == "working" ? green : a.state == "needs_input" ? yellow : a.state == "errored" ? red : a.state == "done" ? blue : muted); width: 84; align: end; maxLines: 1 }
-              }
-              Text { text: "${a.app} · ${a.cwd}"; style: small; color: muted; maxLines: 1 }
-              if a.message != "" {
-                Text { text: a.message; style: small; italic: true; maxLines: 3 }
+        }
+        if tab == -2 {
+          Column {
+            scroll: true
+            fill: true
+            gap: 8
+            padding: [10, 6]
+            background: background
+            if len(inbox ?? []) == 0 {
+              Text { text: inbox == null ? "…" : "No agents running."; style: small; color: muted }
+            }
+            for a in inbox ?? [] key "${a.session}/${a.name}" {
+              let mine = a.session == "omalauncher" && startsWith(a.name, "t")
+              let t = mine ? open.find(x => "t${x.id}" == a.name) : null
+              let c = a.state == "working" ? green : a.state == "needs_input" ? yellow : a.state == "errored" ? red : a.state == "done" ? blue : muted
+              Column {
+                gap: 2
+                padding: [10, 8]
+                border: 1
+                borderColor: alpha(c, 0.5)
+                onTap: { tab = t == null ? tab : t.id }
+                Row {
+                  gap: 6
+                  align: center
+                  Text { text: "●"; width: 12; fontSize: 10; color: c }
+                  Text { text: t == null ? "${a.session} · ${a.name}" : t.agent; style: body; maxLines: 1; weight: 1 }
+                  Text { text: a.needs_you ? "needs you" : a.state; style: small; color: c; width: 84; align: end; maxLines: 1 }
+                }
+                Text { text: "${a.app} · ${a.cwd}"; style: small; color: muted; maxLines: 1 }
+                if a.message != "" {
+                  Text { text: a.message; style: small; italic: true; maxLines: 3 }
+                }
               }
             }
           }
         }
+      }
+    }
+    if tab >= 0 && !reading {
+      // Drag here to scroll the tab: down shows older lines, like any Android list. Sideways drags
+      // scroll nothing.
+      Column {
+        width: 26
+        fill: height
+        justify: center
+        background: alpha(muted, 0.14)
+        onDrag: {
+          dragX = dragX + dx
+          run(abs(dragY + dy) >= 16 && abs(dragY + dy) > abs(dragX) ? "tuios-omalauncher scroll ${int((dragY + dy) / 16)}" : "true")
+          dragX = abs(dragY + dy) >= 16 ? 0 : dragX
+          dragY = abs(dragY + dy) >= 16 ? (dragY + dy) % 16 : dragY + dy
+        }
+        Text { text: "⋮"; style: label; color: muted; align: center }
       }
     }
   }
