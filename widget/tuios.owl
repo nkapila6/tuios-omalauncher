@@ -165,7 +165,8 @@ widget "tuios" {
         weight: 1
         // The tile's one terminal, attached to the session. Hiding it would stop it, so the inbox and
         // the read view cover it instead.
-        Terminal { command: "tuios-omalauncher attach" }
+        // tuios needs at least 40 columns; beside the rail and the strip that takes a smaller font.
+        Terminal { command: "tuios-omalauncher attach"; fontSize: 13 }
         if reading && tab >= 0 {
           Column {
             scroll: true

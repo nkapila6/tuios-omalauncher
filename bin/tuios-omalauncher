@@ -26,6 +26,8 @@ WIDGET=${TUIOS_OMALAUNCHER_WIDGET:-$HOME/.config/omalauncher/widgets/36-tuios.ow
 # history to tuios, which the tile can scroll.
 CLAUDE_FLAGS=(--settings '{"tui":"default"}')
 
+# The daemon process itself: a saved session is listed even while no daemon runs.
+daemon_up() { for p in $(pgrep -x tuios); do tr '\0' ' ' </proc/"$p"/cmdline 2>/dev/null | grep -q ' daemon' && return 0; done; return 1; }
 have_session() { tuios list-sessions --json 2>/dev/null | jq -e --arg s "$S" '[.. | objects | select(.name? == $s)] | length > 0' >/dev/null; }
 windows() { tuios list-windows -s "$S" --json 2>/dev/null; }
 # Window id of tab <id>, by its name t<id>.
@@ -58,12 +60,17 @@ compact() {
 
 case ${1:-} in
   start)
-    have_session && exit 0
+    # Run from the widget, so the daemon lives in the launcher's command shell rather than the tile.
+    # A launcher restart still ends it (and every program in its panes); tuios keeps the layout.
+    daemon_up || tuios start-server >/dev/null 2>&1
+    have_session && tuios session-info -s "$S" >/dev/null 2>&1 && exit 0
     tuios new "$S" -d >/dev/null 2>&1 || exit 1 ;;
 
   attach)
-    for _ in $(seq 50); do have_session && break; sleep 0.2; done
-    have_session || "$0" start
+    # Give the widget time to start the daemon in its own shell; a daemon started from here would
+    # end with the tile.
+    for _ in $(seq 75); do daemon_up && have_session && break; sleep 0.2; done
+    daemon_up || "$0" start
     # Reattach if tuios ever drops the client, rather than leaving the tile on "exited, tap to restart".
     while :; do tuios attach "$S"; sleep 1; have_session || "$0" start; done ;;
 
@@ -146,7 +153,8 @@ case ${1:-} in
     msg=$(jq -cn --arg win "${TUIOS_WINDOW_NAME:-}" --arg state "${TUIOS_AGENT_STATE:-}" \
       --arg harness "${TUIOS_AGENT_HARNESS:-}" --arg text "${TUIOS_AGENT_MESSAGE:-}" \
       '{win: $win, state: $state, harness: $harness, text: ($text | .[0:160]), at: now}')
-    owl-send "$WIDGET" set alert "$msg" >/dev/null 2>&1
+    # owl-send turns a value that parses as JSON into JSON; sent as a JSON string, it stays text.
+    owl-send "$WIDGET" set alert "$(jq -cn --arg m "$msg" '$m')" >/dev/null 2>&1
     mkdir -p ~/.cache/tuios-omalauncher; echo "$(date +%T) hook rc=$? $msg" >>~/.cache/tuios-omalauncher/notify.log ;;
 
   *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
