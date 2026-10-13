@@ -67,12 +67,15 @@ case ${1:-} in
     tuios new "$S" -d >/dev/null 2>&1 || exit 1 ;;
 
   attach)
-    # Give the widget time to start the daemon in its own shell; a daemon started from here would
-    # end with the tile.
-    for _ in $(seq 75); do daemon_up && have_session && break; sleep 0.2; done
-    daemon_up || "$0" start
-    # Reattach if tuios ever drops the client, rather than leaving the tile on "exited, tap to restart".
-    while :; do tuios attach "$S"; sleep 1; have_session || "$0" start; done ;;
+    # tuios attach starts a daemon itself when none runs, and one started here ends when the tile
+    # restarts (a widget edit). The widget's status check starts it in the launcher's command shell
+    # instead, but widget commands only run while the page is on screen, so after 5 s the tile does.
+    while :; do
+      for _ in $(seq 25); do daemon_up && have_session && break; sleep 0.2; done
+      daemon_up || "$0" start
+      tuios attach "$S"
+      sleep 1
+    done ;;
 
   tab)
     id=$2 cmd=$3
@@ -113,6 +116,9 @@ case ${1:-} in
     tuios capture-pane -s "$S" --scrollback --lines 200 2>/dev/null ;;
 
   status)
+    # The widget runs this every few seconds in the launcher's command shell, so it is also what
+    # (re)starts the daemon there, rather than in the tile, where it would end with the tile.
+    daemon_up || "$0" start >/dev/null 2>&1
     # running: what the tab's shell is running right now (empty when it sits at a prompt), so the
     # widget asks before closing a tab that's busy, agent or not.
     windows | jq -r '.windows[]? | select(.display_name | test("^t-?[0-9]+$")) |
