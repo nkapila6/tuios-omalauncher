@@ -64,7 +64,8 @@ case ${1:-} in
   attach)
     for _ in $(seq 50); do have_session && break; sleep 0.2; done
     have_session || "$0" start
-    exec tuios attach "$S" ;;
+    # Reattach if tuios ever drops the client, rather than leaving the tile on "exited, tap to restart".
+    while :; do tuios attach "$S"; sleep 1; have_session || "$0" start; done ;;
 
   tab)
     id=$2 cmd=$3

@@ -213,17 +213,18 @@ widget "tuios" {
       }
     }
     if tab >= 0 && !reading {
-      // Drag here to scroll the tab: down shows older lines, like any Android list.
-      Column {
+      // Drag here to scroll the tab: down shows older lines, like any Android list. A Canvas, because
+      // that's what the launcher hands drags to.
+      Canvas {
         width: 26
-        fill: height
-        justify: center
-        background: alpha(muted, 0.14)
         onDrag: {
           run(abs(dragY + dy) >= 16 ? "tuios-omalauncher scroll ${int((dragY + dy) / 16)}" : "true")
           dragY = abs(dragY + dy) >= 16 ? (dragY + dy) % 16 : dragY + dy
         }
-        Text { text: "⋮"; style: label; color: muted; align: center }
+        rect(0, 0, width, height, fill: alpha(muted, 0.14))
+        for i in range(3) {
+          circle(width / 2, height / 2 + (i - 1) * 7, 1.6, fill: muted)
+        }
       }
     }
   }
