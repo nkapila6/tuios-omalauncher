@@ -33,12 +33,9 @@ widget "tuios" {
   state railOpen = true persist
   // Set by tuios's after-agent-state hook through owl-send (tuios-omalauncher notify-hook).
   state alert = ""
-  // Drag distance not yet scrolled: lines of about 16 dp, vertical drags only.
+  // Drag distance not yet scrolled, in lines of about 16 dp.
   state dragY = 0
-  state dragX = 0
-  state portCmd = ""
   state updateMsg = ""
-  on portCmd { terminal(value, cur == null ? "terminal" : cur.agent) }
 
   let open = len(tabs) > 0 ? tabs : range(len(agents)).map(i => { id: i, agent: agents[i].name })
   let cur = open.find(t => t.id == tab)
@@ -144,7 +141,7 @@ widget "tuios" {
           Text { text: reading ? "⌨ live" : "☰ read"; width: 58; style: label; bold: true; color: reading ? accent : muted; onTap: reading = !reading }
           Text { text: "☷"; width: 22; style: label; color: muted; align: center; onTap: { reading = false; run("tuios-omalauncher show tabs") } }
           Text { text: "◧"; width: 22; style: label; color: muted; align: center; onTap: { reading = false; run("tuios-omalauncher show rail") } }
-          Text { text: "⧉"; width: 22; style: label; color: muted; align: center; onTap: { reading = false; portCmd = run("tuios-omalauncher port ${int(tab)} ${sh(curCmd)}") } }
+          Text { text: "⧉"; width: 22; style: label; color: muted; align: center; onTap: { reading = false; terminal("tuios-omalauncher window", "tuios") } }
           if confirmExit {
             Text { text: "end ${running}?"; width: len(running) * 9 + 46; style: label; color: red; bold: true; onTap: {
               confirmExit = false; reading = false; closing = tab
@@ -216,17 +213,14 @@ widget "tuios" {
       }
     }
     if tab >= 0 && !reading {
-      // Drag here to scroll the tab: down shows older lines, like any Android list. Sideways drags
-      // scroll nothing.
+      // Drag here to scroll the tab: down shows older lines, like any Android list.
       Column {
         width: 26
         fill: height
         justify: center
         background: alpha(muted, 0.14)
         onDrag: {
-          dragX = dragX + dx
-          run(abs(dragY + dy) >= 16 && abs(dragY + dy) > abs(dragX) ? "tuios-omalauncher scroll ${int((dragY + dy) / 16)}" : "true")
-          dragX = abs(dragY + dy) >= 16 ? 0 : dragX
+          run(abs(dragY + dy) >= 16 ? "tuios-omalauncher scroll ${int((dragY + dy) / 16)}" : "true")
           dragY = abs(dragY + dy) >= 16 ? (dragY + dy) % 16 : dragY + dy
         }
         Text { text: "⋮"; style: label; color: muted; align: center }

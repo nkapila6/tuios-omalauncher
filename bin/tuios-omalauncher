@@ -15,8 +15,7 @@
 #   read                  print the shown tab's last 200 lines
 #   status                JSON: each tab's id, program and agent state
 #   inbox                 JSON: every agent in every session, newest first
-#   port <id> <command>   stop a Claude session running in tab <id> and print a command that resumes it
-#                         elsewhere; for anything else, print <command>
+#   window                a separate terminal window on the same session, beside the tile (⧉)
 #   version | update-check | update
 #   setup                 register notify-hook in tuios's config.toml (once; keeps everything else)
 #   notify-hook           run by tuios on agent state changes: passes them to the widget
@@ -88,6 +87,8 @@ case ${1:-} in
     w=$(window_of "$2"); [ -n "$w" ] && tuios close-window -s "$S" "$w" >/dev/null 2>&1 ;;
 
   scroll)
+    # Logged, so a drag that doesn't scroll can be told apart from one that never arrives.
+    mkdir -p ~/.cache/tuios-omalauncher; echo "$(date +%T.%N | cut -c1-12) scroll $2" >>~/.cache/tuios-omalauncher/scroll.log
     n=$2; k=shift+up; [ "$n" -lt 0 ] && { n=$(( -n )); k=shift+down; }
     [ "$n" -gt 60 ] && n=60
     keys=$(printf "$k %.0s" $(seq "$n")); press "${keys% }" ;;
@@ -119,21 +120,9 @@ case ${1:-} in
       app: ((.program_status[0].app // .harness_id // "") | if . == "" then "agent" else . end),
       state, needs_you, message, unread, cwd, at: ((.agent_state_at // 0) / 1e9 | floor)}] | sort_by(-.at)' ;;
 
-  port)
-    id=$2 fallback=$3 pid=
-    for p in $(pgrep -x claude); do grep -qaz -x "AGENT_TAB=$id" /proc/"$p"/environ 2>/dev/null && pid=$p; done
-    f=$HOME/.claude/sessions/$pid.json
-    if [ -n "$pid" ] && [ -f "$f" ]; then
-      sid=$(jq -r '.sessionId // empty' "$f"); cwd=$(jq -r '.cwd // empty' "$f")
-      if [ -n "$sid" ]; then
-        kill -TERM "$pid"
-        for _ in $(seq 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-        # The trailing comment makes each answer unique, so the widget opens a window every time.
-        printf 'cd %q && claude %q %q --resume %q # %s\n' "$cwd" "${CLAUDE_FLAGS[@]}" "$sid" "$(date +%s%N)"
-        exit 0
-      fi
-    fi
-    printf '%s # %s\n' "$fallback" "$(date +%s%N)" ;;
+  window)
+    # Another client on the same session: the tile keeps its tab and this window shows it too.
+    exec tuios attach "$S" ;;
 
   version) tuios --version 2>/dev/null | head -1 ;;
   update-check) tuios update --check 2>&1 | tail -1 ;;
@@ -156,7 +145,8 @@ case ${1:-} in
     msg=$(jq -cn --arg win "${TUIOS_WINDOW_NAME:-}" --arg state "${TUIOS_AGENT_STATE:-}" \
       --arg harness "${TUIOS_AGENT_HARNESS:-}" --arg text "${TUIOS_AGENT_MESSAGE:-}" \
       '{win: $win, state: $state, harness: $harness, text: ($text | .[0:160]), at: now}')
-    owl-send "$WIDGET" set alert "$msg" >/dev/null 2>&1 ;;
+    owl-send "$WIDGET" set alert "$msg" >/dev/null 2>&1
+    mkdir -p ~/.cache/tuios-omalauncher; echo "$(date +%T) hook rc=$? $msg" >>~/.cache/tuios-omalauncher/notify.log ;;
 
   *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
